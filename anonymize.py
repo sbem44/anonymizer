@@ -12,6 +12,7 @@ import argparse
 import gzip
 import json
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -36,6 +37,21 @@ SKIP_DIR_NAMES = {
 }
 
 
+def _whole_word_replace(text: str, old: str, new: str) -> str:
+    """Replace *old* with *new* only when *old* appears as a whole word.
+
+    Word boundaries (\\b) are added on each side where the term starts/ends
+    with a word character ([a-zA-Z0-9_]).  This avoids matching *old* when
+    it is embedded inside a larger identifier (e.g. term "isp" must NOT
+    match "provaispprova") while still matching at punctuation boundaries
+    (e.g. "isp.com", "//ISP").
+    """
+    escaped = re.escape(old)
+    prefix = r"\b" if old and (old[0].isalnum() or old[0] == "_") else ""
+    suffix = r"\b" if old and (old[-1].isalnum() or old[-1] == "_") else ""
+    return re.sub(prefix + escaped + suffix, lambda _: new, text)
+
+
 def _make_token(used: set[str]) -> str:
     while True:
         t = f"{TOKEN_PREFIX}{secrets.token_hex(16)}{TOKEN_SUFFIX}"
@@ -52,15 +68,23 @@ def _iter_files(root: Path):
             yield Path(dirpath) / name
 
 
-def _read_text(path: Path) -> str | None:
-    try:
-        return path.read_text(encoding="utf-8", newline="")
-    except (UnicodeDecodeError, OSError):
-        return None
+_ENCODINGS = ("utf-8", "latin-1")
 
 
-def _write_text(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8", newline="")
+def _read_text(path: Path) -> tuple[str, str] | None:
+    """Try reading *path* as text, returning ``(content, encoding)`` or None."""
+    for enc in _ENCODINGS:
+        try:
+            return path.read_text(encoding=enc, newline=""), enc
+        except (UnicodeDecodeError, ValueError):
+            continue
+        except OSError:
+            return None
+    return None
+
+
+def _write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    path.write_text(text, encoding=encoding, newline="")
 
 
 def _load_map(map_path: Path) -> list[list[str]]:
@@ -106,15 +130,15 @@ def anonymize(terms: list[str], folder: Path, map_path: Path) -> None:
     # Apply only new replacements; sort longest-first to avoid partial overlaps
     changed_files = 0
     for path in _iter_files(root):
-        text = _read_text(path)
-        if text is None:
+        result = _read_text(path)
+        if result is None:
             continue
+        text, enc = result
         orig = text
         for old, new in new_pairs:
-            if old in text:
-                text = text.replace(old, new)
+            text = _whole_word_replace(text, old, new)
         if text != orig:
-            _write_text(path, text)
+            _write_text(path, text, enc)
             changed_files += 1
 
     # Merge: existing pairs + new pairs, re-sorted longest original first
@@ -162,15 +186,16 @@ def restore(map_path: Path, folder: Path) -> None:
 
     changed_files = 0
     for path in _iter_files(root):
-        text = _read_text(path)
-        if text is None:
+        result = _read_text(path)
+        if result is None:
             continue
+        text, enc = result
         orig = text
         for old, new in pairs:
             if new in text:
                 text = text.replace(new, old)
         if text != orig:
-            _write_text(path, text)
+            _write_text(path, text, enc)
             changed_files += 1
 
     print(f"Restored; updated {changed_files} file(s).", file=sys.stderr)
