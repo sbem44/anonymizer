@@ -201,6 +201,28 @@ def restore(map_path: Path, folder: Path) -> None:
     print(f"Restored; updated {changed_files} file(s).", file=sys.stderr)
 
 
+def decode_token(token: str, map_path: Path) -> None:
+    pairs = _load_map(map_path)
+    if not pairs:
+        raise SystemExit(f"Map file is empty or missing: {map_path}")
+    for original, anon in pairs:
+        if anon == token:
+            print(original)
+            return
+    raise SystemExit(f"Token not found in map: {token}")
+
+
+def encode_token(term: str, map_path: Path) -> None:
+    pairs = _load_map(map_path)
+    if not pairs:
+        raise SystemExit(f"Map file is empty or missing: {map_path}")
+    for original, anon in pairs:
+        if original == term:
+            print(anon)
+            return
+    raise SystemExit(f"Term not found in map: {term}")
+
+
 def _load_terms_file(path: Path) -> list[str]:
     return [ln.rstrip("\n\r") for ln in path.read_text(encoding="utf-8").splitlines()]
 
@@ -253,6 +275,14 @@ def main() -> None:
     r.add_argument("--map", type=Path, required=True, help="Mapping file from anonymize.")
     r.add_argument("--folder", type=Path, required=True, help="Same root folder as anonymize.")
 
+    g = sub.add_parser("decode", help="Show the original value of an anonymized token.")
+    g.add_argument("token", help="The anonymized token to look up (e.g. __M_ANON_<hex>__).")
+    g.add_argument("--map", type=Path, required=True, help="Mapping file from anonymize.")
+
+    e = sub.add_parser("encode", help="Show the anonymized token for a plain-text term.")
+    e.add_argument("term", help="The original term to look up.")
+    e.add_argument("--map", type=Path, required=True, help="Mapping file from anonymize.")
+
     args = ap.parse_args()
     if args.cmd == "anonymize":
         terms = list(args.terms)
@@ -265,6 +295,10 @@ def main() -> None:
                 "Provide --terms, --terms-file, and/or --gitleaks-report with at least one term."
             )
         anonymize(terms, args.folder, args.map)
+    elif args.cmd == "decode":
+        decode_token(args.token, args.map)
+    elif args.cmd == "encode":
+        encode_token(args.term, args.map)
     else:
         restore(args.map, args.folder)
 
