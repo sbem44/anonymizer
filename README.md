@@ -45,6 +45,20 @@ python3 anonymize.py restore \
   --map /path/to/map.anon
 ```
 
+**Decode** — look up the original value of an anonymized token:
+
+```bash
+python3 anonymize.py decode __M_ANON_e647cc08cc120d60aa5d9010b2eb33e5__ \
+  --map /path/to/map.anon
+```
+
+**Encode** — look up the anonymized token for a plain-text term:
+
+```bash
+python3 anonymize.py encode "myplainkeyword" \
+  --map /path/to/map.anon
+```
+
 ## Map file
 
 The map is gzip-compressed JSON: `{"v":1,"p":[["old","new"],...]}`. If the file is not gzip (no gzip header), plain JSON is accepted.
