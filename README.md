@@ -86,7 +86,7 @@ python3 anonymize.py restore --folder ./project --map ./map.anon
 
 ## Notes
 
-- Only **UTF-8** text files are modified; other files are skipped.
+- Only **UTF-8** text files are modified. Binary files (JARs, ZIPs, images, etc.) are never changed — skipped by extension and by NUL-byte detection. See `BINARY_EXTENSIONS` in `anonymize.py`.
 - Some directories are skipped (for example `.git`, `node_modules`, `target`, build/virtualenv folders). See `SKIP_DIR_NAMES` in `anonymize.py`.
-- Keep the map **outside** the tree you anonymize, or use a binary name, so it is not edited by mistake.
+- Keep the map **outside** the tree you anonymize so it is not edited by mistake.
 - Treat the map as **secret**; it contains the original strings.

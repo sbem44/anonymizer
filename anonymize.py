@@ -36,6 +36,52 @@ SKIP_DIR_NAMES = {
     "venv",
 }
 
+# Never rewrite these as text (archives, bytecode, media, etc.).
+BINARY_EXTENSIONS = {
+    ".7z",
+    ".a",
+    ".avi",
+    ".bin",
+    ".bmp",
+    ".bz2",
+    ".class",
+    ".db",
+    ".dll",
+    ".dylib",
+    ".ear",
+    ".eot",
+    ".exe",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".mkv",
+    ".mov",
+    ".mp3",
+    ".mp4",
+    ".o",
+    ".otf",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".pyo",
+    ".rar",
+    ".so",
+    ".sqlite",
+    ".tar",
+    ".tgz",
+    ".ttf",
+    ".war",
+    ".wasm",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".xz",
+    ".zip",
+}
+
 
 def _whole_word_replace(text: str, old: str, new: str) -> str:
     """Replace *old* with *new* only when *old* appears as a whole word.
@@ -68,23 +114,33 @@ def _iter_files(root: Path):
             yield Path(dirpath) / name
 
 
-_ENCODINGS = ("utf-8", "latin-1")
+def _is_binary_path(path: Path) -> bool:
+    return path.suffix.lower() in BINARY_EXTENSIONS
 
 
-def _read_text(path: Path) -> tuple[str, str] | None:
-    """Try reading *path* as text, returning ``(content, encoding)`` or None."""
-    for enc in _ENCODINGS:
-        try:
-            return path.read_text(encoding=enc, newline=""), enc
-        except (UnicodeDecodeError, ValueError):
-            continue
-        except OSError:
-            return None
-    return None
+def _read_text(path: Path) -> str | None:
+    """Read *path* as UTF-8 text, or None if binary / undecodable / unreadable.
+
+    Binary files (known extensions, or containing NUL bytes) are never treated
+    as text — latin-1 and similar fallbacks are intentionally avoided because
+    they can decode arbitrary bytes and corrupt archives such as JARs.
+    """
+    if _is_binary_path(path):
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
-def _write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
-    path.write_text(text, encoding=encoding, newline="")
+def _write_text(path: Path, text: str) -> None:
+    path.write_text(text, encoding="utf-8", newline="")
 
 
 def _load_map(map_path: Path) -> list[list[str]]:
@@ -130,15 +186,14 @@ def anonymize(terms: list[str], folder: Path, map_path: Path) -> None:
     # Apply only new replacements; sort longest-first to avoid partial overlaps
     changed_files = 0
     for path in _iter_files(root):
-        result = _read_text(path)
-        if result is None:
+        text = _read_text(path)
+        if text is None:
             continue
-        text, enc = result
         orig = text
         for old, new in new_pairs:
             text = _whole_word_replace(text, old, new)
         if text != orig:
-            _write_text(path, text, enc)
+            _write_text(path, text)
             changed_files += 1
 
     # Merge: existing pairs + new pairs, re-sorted longest original first
@@ -186,16 +241,15 @@ def restore(map_path: Path, folder: Path) -> None:
 
     changed_files = 0
     for path in _iter_files(root):
-        result = _read_text(path)
-        if result is None:
+        text = _read_text(path)
+        if text is None:
             continue
-        text, enc = result
         orig = text
         for old, new in pairs:
             if new in text:
                 text = text.replace(new, old)
         if text != orig:
-            _write_text(path, text, enc)
+            _write_text(path, text)
             changed_files += 1
 
     print(f"Restored; updated {changed_files} file(s).", file=sys.stderr)
