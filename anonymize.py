@@ -83,6 +83,15 @@ BINARY_EXTENSIONS = {
 }
 
 
+def _whole_word_pattern(term: str, *, ignore_case: bool = False) -> re.Pattern[str]:
+    """Compile a whole-word pattern for *term* (optional case-insensitive)."""
+    escaped = re.escape(term)
+    prefix = r"\b" if term and (term[0].isalnum() or term[0] == "_") else ""
+    suffix = r"\b" if term and (term[-1].isalnum() or term[-1] == "_") else ""
+    flags = re.IGNORECASE if ignore_case else 0
+    return re.compile(prefix + escaped + suffix, flags)
+
+
 def _whole_word_replace(text: str, old: str, new: str) -> str:
     """Replace *old* with *new* only when *old* appears as a whole word.
 
@@ -92,10 +101,32 @@ def _whole_word_replace(text: str, old: str, new: str) -> str:
     match "provaispprova") while still matching at punctuation boundaries
     (e.g. "isp.com", "//ISP").
     """
-    escaped = re.escape(old)
-    prefix = r"\b" if old and (old[0].isalnum() or old[0] == "_") else ""
-    suffix = r"\b" if old and (old[-1].isalnum() or old[-1] == "_") else ""
-    return re.sub(prefix + escaped + suffix, lambda _: new, text)
+    return _whole_word_pattern(old).sub(lambda _: new, text)
+
+
+def _discover_case_variants(root: Path, terms: list[str]) -> set[str]:
+    """Find exact surface forms in the tree that match *terms* case-insensitively.
+
+    Each distinct casing (e.g. banca / Banca / BANCA) is returned as-is so
+    anonymize can assign a separate token per form.
+    """
+    patterns = [_whole_word_pattern(t, ignore_case=True) for t in terms if t]
+    if not patterns:
+        return set()
+    found: set[str] = set()
+    for path in _iter_files(root):
+        text = _read_text(path)
+        if text is None:
+            continue
+        for pat in patterns:
+            for match in pat.finditer(text):
+                found.add(match.group(0))
+    for path in _collect_dirs(root):
+        name = path.name
+        for pat in patterns:
+            for match in pat.finditer(name):
+                found.add(match.group(0))
+    return found
 
 
 def _make_token(used: set[str]) -> str:
@@ -112,6 +143,55 @@ def _iter_files(root: Path):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
         for name in filenames:
             yield Path(dirpath) / name
+
+
+def _collect_dirs(root: Path) -> list[Path]:
+    """Return directories under *root* (not including root), deepest first.
+
+    Skipped directory names (see SKIP_DIR_NAMES) are not entered and not renamed.
+    Deepest-first order keeps child renames valid before parents move.
+    """
+    root = root.resolve()
+    dirs: list[Path] = []
+    for dirpath, dirnames, _filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+        for name in dirnames:
+            dirs.append(Path(dirpath) / name)
+    dirs.sort(key=lambda p: len(p.parts), reverse=True)
+    return dirs
+
+
+def _rename_dirs(root: Path, pairs: list[tuple[str, str]], *, reverse: bool) -> int:
+    """Rename directory basenames under *root* according to *pairs*.
+
+    When *reverse* is False, apply whole-word old→new (anonymize).
+    When *reverse* is True, replace new→old tokens (restore).
+    Returns the number of directories renamed.
+    """
+    changed = 0
+    for path in _collect_dirs(root):
+        name = path.name
+        new_name = name
+        if reverse:
+            for old, new in pairs:
+                if new in new_name:
+                    new_name = new_name.replace(new, old)
+        else:
+            for old, new in pairs:
+                new_name = _whole_word_replace(new_name, old, new)
+        if new_name == name:
+            continue
+        dest = path.parent / new_name
+        if dest.exists():
+            print(f"Skip rename (target exists): {path} -> {dest}", file=sys.stderr)
+            continue
+        try:
+            path.rename(dest)
+        except OSError as exc:
+            print(f"Skip rename ({exc}): {path} -> {dest}", file=sys.stderr)
+            continue
+        changed += 1
+    return changed
 
 
 def _is_binary_path(path: Path) -> bool:
@@ -162,7 +242,13 @@ def _load_map(map_path: Path) -> list[list[str]]:
     return [list(item) for item in plist if isinstance(item, (list, tuple)) and len(item) == 2]
 
 
-def anonymize(terms: list[str], folder: Path, map_path: Path) -> None:
+def anonymize(
+    terms: list[str],
+    folder: Path,
+    map_path: Path,
+    *,
+    ignore_case: bool = False,
+) -> None:
     root = folder.resolve()
     if not root.is_dir():
         raise SystemExit(f"Not a directory: {root}")
@@ -171,9 +257,19 @@ def anonymize(terms: list[str], folder: Path, map_path: Path) -> None:
     already_mapped: set[str] = {p[0] for p in existing_pairs}
     used: set[str] = {p[1] for p in existing_pairs}
 
-    new_terms = sorted({t for t in terms if t and t not in already_mapped}, key=len, reverse=True)
-    if not new_terms and not existing_pairs:
+    seed_terms = [t for t in terms if t]
+    if not seed_terms and not existing_pairs:
         raise SystemExit("No non-empty terms to anonymize.")
+    if not seed_terms:
+        print("No non-empty terms provided; nothing to anonymize.", file=sys.stderr)
+        return
+
+    candidates: set[str] = set(seed_terms)
+    if ignore_case:
+        # Discover every casing present in the tree; each form gets its own token.
+        candidates |= _discover_case_variants(root, seed_terms)
+
+    new_terms = sorted((t for t in candidates if t not in already_mapped), key=len, reverse=True)
     if not new_terms:
         print("All terms already present in existing map; nothing new to anonymize.", file=sys.stderr)
         return
@@ -196,6 +292,9 @@ def anonymize(terms: list[str], folder: Path, map_path: Path) -> None:
             _write_text(path, text)
             changed_files += 1
 
+    # Rename directories after file edits so walks still see original paths
+    renamed_dirs = _rename_dirs(root, [(o, n) for o, n in new_pairs], reverse=False)
+
     # Merge: existing pairs + new pairs, re-sorted longest original first
     all_pairs = existing_pairs + new_pairs
     all_pairs.sort(key=lambda x: len(x[0]), reverse=True)
@@ -208,7 +307,7 @@ def anonymize(terms: list[str], folder: Path, map_path: Path) -> None:
     total = len(all_pairs)
     print(
         f"Anonymized {len(new_pairs)} new term(s); {total} total in map; "
-        f"updated {changed_files} file(s). Map: {map_path}",
+        f"updated {changed_files} file(s); renamed {renamed_dirs} dir(s). Map: {map_path}",
         file=sys.stderr,
     )
 
@@ -252,7 +351,12 @@ def restore(map_path: Path, folder: Path) -> None:
             _write_text(path, text)
             changed_files += 1
 
-    print(f"Restored; updated {changed_files} file(s).", file=sys.stderr)
+    renamed_dirs = _rename_dirs(root, pairs, reverse=True)
+
+    print(
+        f"Restored; updated {changed_files} file(s); renamed {renamed_dirs} dir(s).",
+        file=sys.stderr,
+    )
 
 
 def decode_token(token: str, map_path: Path) -> None:
@@ -305,6 +409,8 @@ def _load_gitleaks_secrets(path: Path) -> list[str]:
     if not out:
         raise SystemExit(f"No Secret fields found in Gitleaks report: {path}")
     return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Anonymize or restore text under a folder.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -323,6 +429,14 @@ def main() -> None:
         type=Path,
         required=True,
         help="Output mapping file (.json.gz recommended).",
+    )
+    a.add_argument(
+        "--ignore-case",
+        action="store_true",
+        help=(
+            "Match terms case-insensitively, but assign a distinct token to each "
+            "exact casing found (e.g. banca and Banca get different tokens)."
+        ),
     )
 
     r = sub.add_parser("restore", help="Replace tokens from map with original terms.")
@@ -348,7 +462,7 @@ def main() -> None:
             raise SystemExit(
                 "Provide --terms, --terms-file, and/or --gitleaks-report with at least one term."
             )
-        anonymize(terms, args.folder, args.map)
+        anonymize(terms, args.folder, args.map, ignore_case=args.ignore_case)
     elif args.cmd == "decode":
         decode_token(args.token, args.map)
     elif args.cmd == "encode":
