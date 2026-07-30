@@ -55,11 +55,40 @@ With `--ignore-case`, a single term `banca` can produce map entries like:
 
 Only casings that actually appear in the tree are added (plus the term you passed). Without `--ignore-case`, matching stays exact and case-sensitive.
 
-**Restore** — swap tokens back to the original strings (use the same folder root as anonymize):
+**Single file** — use `--file` instead of `--folder` (same term sources work):
+
+```bash
+python3 anonymize.py anonymize \
+  --file /path/to/notes.txt \
+  --map /path/to/map.anon \
+  --terms banca
+```
+
+```bash
+python3 anonymize.py anonymize \
+  --file /path/to/notes.txt \
+  --map /path/to/map.anon \
+  --terms-file ./terms.txt
+```
+
+```bash
+python3 anonymize.py anonymize \
+  --file /path/to/notes.txt \
+  --map /path/to/map.anon \
+  --gitleaks-report ./gitleaks-report.json
+```
+
+**Restore** — swap tokens back to the original strings (same `--folder` or `--file` as anonymize):
 
 ```bash
 python3 anonymize.py restore \
   --folder /path/to/project \
+  --map /path/to/map.anon
+```
+
+```bash
+python3 anonymize.py restore \
+  --file /path/to/notes.txt \
   --map /path/to/map.anon
 ```
 
@@ -105,7 +134,8 @@ python3 anonymize.py restore --folder ./project --map ./map.anon
 ## Notes
 
 - Only **UTF-8** text files are modified. Binary files (JARs, ZIPs, images, etc.) are never changed — skipped by extension and by NUL-byte detection. See `BINARY_EXTENSIONS` in `anonymize.py`.
-- Directory **names** are also anonymized/restored (deepest paths first). The `--folder` root itself is not renamed. If a rename target already exists, that rename is skipped with a warning.
+- Directory **names** are also anonymized/restored when using `--folder` (deepest paths first). The `--folder` root itself is not renamed. If a rename target already exists, that rename is skipped with a warning.
+- Use either `--folder` or `--file` (exactly one).
 - Default matching is **case-sensitive**. With `--ignore-case`, matching is case-insensitive but each distinct casing gets its own token (restore keeps the original case).
 - Some directories are skipped (for example `.git`, `node_modules`, `target`, build/virtualenv folders). See `SKIP_DIR_NAMES` in `anonymize.py`.
 - Keep the map **outside** the tree you anonymize so it is not edited by mistake.

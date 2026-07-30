@@ -104,29 +104,89 @@ def _whole_word_replace(text: str, old: str, new: str) -> str:
     return _whole_word_pattern(old).sub(lambda _: new, text)
 
 
-def _discover_case_variants(root: Path, terms: list[str]) -> set[str]:
-    """Find exact surface forms in the tree that match *terms* case-insensitively.
+def _discover_case_variants(
+    terms: list[str],
+    *,
+    files: list[Path] | None = None,
+    root: Path | None = None,
+) -> set[str]:
+    """Find exact surface forms that match *terms* case-insensitively.
 
     Each distinct casing (e.g. banca / Banca / BANCA) is returned as-is so
     anonymize can assign a separate token per form.
+
+    Scans *files* when given; otherwise scans text files (and directory names)
+    under *root*.
     """
     patterns = [_whole_word_pattern(t, ignore_case=True) for t in terms if t]
     if not patterns:
         return set()
     found: set[str] = set()
+
+    def _scan_text(text: str) -> None:
+        for pat in patterns:
+            for match in pat.finditer(text):
+                found.add(match.group(0))
+
+    if files is not None:
+        for path in files:
+            text = _read_text(path)
+            if text is None:
+                continue
+            _scan_text(text)
+        return found
+
+    if root is None:
+        return found
     for path in _iter_files(root):
         text = _read_text(path)
         if text is None:
             continue
-        for pat in patterns:
-            for match in pat.finditer(text):
-                found.add(match.group(0))
+        _scan_text(text)
     for path in _collect_dirs(root):
-        name = path.name
-        for pat in patterns:
-            for match in pat.finditer(name):
-                found.add(match.group(0))
+        _scan_text(path.name)
     return found
+
+
+def _build_anonymize_pairs(
+    seed_terms: list[str],
+    existing_pairs: list[list[str]],
+    *,
+    ignore_case: bool,
+    files: list[Path] | None = None,
+    root: Path | None = None,
+) -> list[list[str]]:
+    """Return new map pairs for *seed_terms* not already present in the map."""
+    already: dict[str, str] = {p[0]: p[1] for p in existing_pairs}
+    used: set[str] = set(already.values())
+    candidates: set[str] = set(seed_terms)
+    if ignore_case:
+        candidates |= _discover_case_variants(seed_terms, files=files, root=root)
+
+    new_pairs: list[list[str]] = []
+    for old in sorted(candidates, key=len, reverse=True):
+        if old in already:
+            continue
+        new_pairs.append([old, _make_token(used)])
+    return new_pairs
+
+
+def _save_map(map_path: Path, pairs: list[list[str]]) -> None:
+    pairs = sorted(pairs, key=lambda x: len(x[0]), reverse=True)
+    payload = json.dumps({"v": MAP_VERSION, "p": pairs}, ensure_ascii=False, separators=(",", ":"))
+    map_path = map_path.resolve()
+    map_path.parent.mkdir(parents=True, exist_ok=True)
+    map_path.write_bytes(gzip.compress(payload.encode("utf-8"), compresslevel=9))
+
+
+def _require_text_file(path: Path) -> str:
+    path = path.resolve()
+    if not path.is_file():
+        raise SystemExit(f"Not a file: {path}")
+    text = _read_text(path)
+    if text is None:
+        raise SystemExit(f"Not a readable UTF-8 text file: {path}")
+    return text
 
 
 def _make_token(used: set[str]) -> str:
@@ -242,81 +302,20 @@ def _load_map(map_path: Path) -> list[list[str]]:
     return [list(item) for item in plist if isinstance(item, (list, tuple)) and len(item) == 2]
 
 
-def anonymize(
-    terms: list[str],
-    folder: Path,
-    map_path: Path,
-    *,
-    ignore_case: bool = False,
-) -> None:
-    root = folder.resolve()
-    if not root.is_dir():
-        raise SystemExit(f"Not a directory: {root}")
-
-    existing_pairs = _load_map(map_path)
-    already_mapped: set[str] = {p[0] for p in existing_pairs}
-    used: set[str] = {p[1] for p in existing_pairs}
-
-    seed_terms = [t for t in terms if t]
-    if not seed_terms and not existing_pairs:
-        raise SystemExit("No non-empty terms to anonymize.")
-    if not seed_terms:
-        print("No non-empty terms provided; nothing to anonymize.", file=sys.stderr)
-        return
-
-    candidates: set[str] = set(seed_terms)
-    if ignore_case:
-        # Discover every casing present in the tree; each form gets its own token.
-        candidates |= _discover_case_variants(root, seed_terms)
-
-    new_terms = sorted((t for t in candidates if t not in already_mapped), key=len, reverse=True)
-    if not new_terms:
-        print("All terms already present in existing map; nothing new to anonymize.", file=sys.stderr)
-        return
-
-    new_pairs: list[list[str]] = []
-    for old in new_terms:
-        new = _make_token(used)
-        new_pairs.append([old, new])
-
-    # Apply only new replacements; sort longest-first to avoid partial overlaps
-    changed_files = 0
-    for path in _iter_files(root):
-        text = _read_text(path)
-        if text is None:
-            continue
-        orig = text
-        for old, new in new_pairs:
-            text = _whole_word_replace(text, old, new)
-        if text != orig:
-            _write_text(path, text)
-            changed_files += 1
-
-    # Rename directories after file edits so walks still see original paths
-    renamed_dirs = _rename_dirs(root, [(o, n) for o, n in new_pairs], reverse=False)
-
-    # Merge: existing pairs + new pairs, re-sorted longest original first
-    all_pairs = existing_pairs + new_pairs
-    all_pairs.sort(key=lambda x: len(x[0]), reverse=True)
-
-    payload = json.dumps({"v": MAP_VERSION, "p": all_pairs}, ensure_ascii=False, separators=(",", ":"))
-    map_path = map_path.resolve()
-    map_path.parent.mkdir(parents=True, exist_ok=True)
-    map_path.write_bytes(gzip.compress(payload.encode("utf-8"), compresslevel=9))
-
-    total = len(all_pairs)
-    print(
-        f"Anonymized {len(new_pairs)} new term(s); {total} total in map; "
-        f"updated {changed_files} file(s); renamed {renamed_dirs} dir(s). Map: {map_path}",
-        file=sys.stderr,
-    )
+def _apply_anonymize(text: str, pairs: list[tuple[str, str]]) -> str:
+    for old, new in pairs:
+        text = _whole_word_replace(text, old, new)
+    return text
 
 
-def restore(map_path: Path, folder: Path) -> None:
-    root = folder.resolve()
-    if not root.is_dir():
-        raise SystemExit(f"Not a directory: {root}")
+def _apply_restore(text: str, pairs: list[tuple[str, str]]) -> str:
+    for old, new in pairs:
+        if new in text:
+            text = text.replace(new, old)
+    return text
 
+
+def _load_restore_pairs(map_path: Path) -> list[tuple[str, str]]:
     raw = map_path.read_bytes()
     if len(raw) >= 2 and raw[0] == 0x1F and raw[1] == 0x8B:
         data = gzip.decompress(raw).decode("utf-8")
@@ -337,6 +336,129 @@ def restore(map_path: Path, folder: Path) -> None:
             pairs.append((old, new))
     # Longest "new" first so one placeholder is never split by another
     pairs.sort(key=lambda x: len(x[1]), reverse=True)
+    return pairs
+
+
+def anonymize(
+    terms: list[str],
+    map_path: Path,
+    *,
+    folder: Path | None = None,
+    file: Path | None = None,
+    ignore_case: bool = False,
+) -> None:
+    if (folder is None) == (file is None):
+        raise SystemExit("Provide exactly one of --folder or --file.")
+
+    seed_terms = [t for t in terms if t]
+    if not seed_terms:
+        raise SystemExit("No non-empty terms to anonymize.")
+
+    existing_pairs = _load_map(map_path)
+
+    if file is not None:
+        path = file.resolve()
+        text = _require_text_file(path)
+        new_pairs = _build_anonymize_pairs(
+            seed_terms,
+            existing_pairs,
+            ignore_case=ignore_case,
+            files=[path],
+        )
+        if not new_pairs:
+            print(
+                "All terms already present in existing map; nothing new to anonymize.",
+                file=sys.stderr,
+            )
+            return
+        out = _apply_anonymize(text, [(o, n) for o, n in new_pairs])
+        if out != text:
+            _write_text(path, out)
+            changed_files = 1
+        else:
+            changed_files = 0
+        _save_map(map_path, existing_pairs + new_pairs)
+        print(
+            f"Anonymized {len(new_pairs)} new term(s); "
+            f"{len(existing_pairs) + len(new_pairs)} total in map; "
+            f"updated {changed_files} file(s); renamed 0 dir(s). Map: {map_path.resolve()}",
+            file=sys.stderr,
+        )
+        return
+
+    assert folder is not None
+    root = folder.resolve()
+    if not root.is_dir():
+        raise SystemExit(f"Not a directory: {root}")
+
+    new_pairs = _build_anonymize_pairs(
+        seed_terms,
+        existing_pairs,
+        ignore_case=ignore_case,
+        root=root,
+    )
+    if not new_pairs:
+        print(
+            "All terms already present in existing map; nothing new to anonymize.",
+            file=sys.stderr,
+        )
+        return
+
+    # Apply only new replacements; sort longest-first to avoid partial overlaps
+    changed_files = 0
+    for path in _iter_files(root):
+        text = _read_text(path)
+        if text is None:
+            continue
+        orig = text
+        text = _apply_anonymize(text, [(o, n) for o, n in new_pairs])
+        if text != orig:
+            _write_text(path, text)
+            changed_files += 1
+
+    # Rename directories after file edits so walks still see original paths
+    renamed_dirs = _rename_dirs(root, [(o, n) for o, n in new_pairs], reverse=False)
+
+    all_pairs = existing_pairs + new_pairs
+    _save_map(map_path, all_pairs)
+
+    print(
+        f"Anonymized {len(new_pairs)} new term(s); {len(all_pairs)} total in map; "
+        f"updated {changed_files} file(s); renamed {renamed_dirs} dir(s). Map: {map_path.resolve()}",
+        file=sys.stderr,
+    )
+
+
+def restore(
+    map_path: Path,
+    *,
+    folder: Path | None = None,
+    file: Path | None = None,
+) -> None:
+    if (folder is None) == (file is None):
+        raise SystemExit("Provide exactly one of --folder or --file.")
+
+    pairs = _load_restore_pairs(map_path)
+
+    if file is not None:
+        path = file.resolve()
+        text = _require_text_file(path)
+        out = _apply_restore(text, pairs)
+        if out != text:
+            _write_text(path, out)
+            changed_files = 1
+        else:
+            changed_files = 0
+        print(
+            f"Restored; updated {changed_files} file(s); renamed 0 dir(s).",
+            file=sys.stderr,
+        )
+        return
+
+    assert folder is not None
+    root = folder.resolve()
+    if not root.is_dir():
+        raise SystemExit(f"Not a directory: {root}")
 
     changed_files = 0
     for path in _iter_files(root):
@@ -344,9 +466,7 @@ def restore(map_path: Path, folder: Path) -> None:
         if text is None:
             continue
         orig = text
-        for old, new in pairs:
-            if new in text:
-                text = text.replace(new, old)
+        text = _apply_restore(text, pairs)
         if text != orig:
             _write_text(path, text)
             changed_files += 1
@@ -411,8 +531,14 @@ def _load_gitleaks_secrets(path: Path) -> list[str]:
     return out
 
 
+def _add_target_args(parser: argparse.ArgumentParser) -> None:
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--folder", type=Path, help="Root folder to scan.")
+    target.add_argument("--file", type=Path, help="Single text file to process.")
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Anonymize or restore text under a folder.")
+    ap = argparse.ArgumentParser(description="Anonymize or restore text under a folder or file.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("anonymize", help="Replace terms with unique tokens; write map file.")
@@ -423,7 +549,7 @@ def main() -> None:
         type=Path,
         help="Gitleaks JSON report: JSON array of objects; each object's Secret becomes a term.",
     )
-    a.add_argument("--folder", type=Path, required=True, help="Root folder to scan.")
+    _add_target_args(a)
     a.add_argument(
         "--map",
         type=Path,
@@ -441,7 +567,7 @@ def main() -> None:
 
     r = sub.add_parser("restore", help="Replace tokens from map with original terms.")
     r.add_argument("--map", type=Path, required=True, help="Mapping file from anonymize.")
-    r.add_argument("--folder", type=Path, required=True, help="Same root folder as anonymize.")
+    _add_target_args(r)
 
     g = sub.add_parser("decode", help="Show the original value of an anonymized token.")
     g.add_argument("token", help="The anonymized token to look up (e.g. __M_ANON_<hex>__).")
@@ -462,13 +588,23 @@ def main() -> None:
             raise SystemExit(
                 "Provide --terms, --terms-file, and/or --gitleaks-report with at least one term."
             )
-        anonymize(terms, args.folder, args.map, ignore_case=args.ignore_case)
+        anonymize(
+            terms,
+            args.map,
+            folder=args.folder,
+            file=args.file,
+            ignore_case=args.ignore_case,
+        )
     elif args.cmd == "decode":
         decode_token(args.token, args.map)
     elif args.cmd == "encode":
         encode_token(args.term, args.map)
     else:
-        restore(args.map, args.folder)
+        restore(
+            args.map,
+            folder=args.folder,
+            file=args.file,
+        )
 
 
 if __name__ == "__main__":
