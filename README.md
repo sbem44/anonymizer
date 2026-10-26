@@ -37,6 +37,20 @@ python3 anonymize.py anonymize \
 
 You can combine `--terms`, `--terms-file`, and `--gitleaks-report`.
 
+Java `@author AUTHOR` entries are discovered automatically in `.java` files,
+even when no explicit terms are supplied:
+
+```bash
+python3 anonymize.py anonymize --folder /path/to/project --map /path/to/map.anon
+```
+
+For example, `@author MARIO ROSSI` becomes `__M_ANON_…__`, including the
+`@author` tag itself. The entry extends to the end of its line or the closing
+comment delimiter; surrounding whitespace and comment markers are preserved.
+Identical entries share one token across files and incremental runs using the
+same map. Discovered entries are treated like other terms, including support
+for `restore`, `encode`, and `decode`. Discovery also works with `--file`.
+
 **Case-insensitive match** — find every casing of a term, but keep a **separate token per exact form** (so restore preserves case):
 
 ```bash
@@ -112,7 +126,7 @@ The map is gzip-compressed JSON: `{"v":1,"p":[["old","new"],...]}`. If the file 
 
 ## Incremental runs
 
-Running `anonymize` multiple times with the **same `--map` file** is fully supported. The script loads the existing map, skips terms already handled, anonymizes only the new terms, and saves a combined map. A single `restore` call undoes everything.
+Running `anonymize` multiple times with the **same `--map` file** is fully supported. The script loads the existing map, reuses its tokens for matching terms (including in newly added files), creates tokens for new terms, and saves a combined map. A single `restore` call undoes everything.
 
 ```bash
 # First pass: secrets from gitleaks

@@ -171,6 +171,23 @@ def _build_anonymize_pairs(
     return new_pairs
 
 
+def _discover_java_authors(paths) -> set[str]:
+    """Collect complete @author entries, excluding whitespace and comment closers."""
+    pattern = re.compile(r"@author[ \t]+(?:(?!\*+/)[^\r\n])+")
+    found: set[str] = set()
+    for path in paths:
+        if path.suffix.lower() != ".java":
+            continue
+        text = _read_text(path)
+        if text is None:
+            continue
+        for match in pattern.finditer(text):
+            entry = match.group(0).rstrip()
+            if entry != "@author":
+                found.add(entry)
+    return found
+
+
 def _save_map(map_path: Path, pairs: list[list[str]]) -> None:
     pairs = sorted(pairs, key=lambda x: len(x[0]), reverse=True)
     payload = json.dumps({"v": MAP_VERSION, "p": pairs}, ensure_ascii=False, separators=(",", ":"))
@@ -351,27 +368,22 @@ def anonymize(
         raise SystemExit("Provide exactly one of --folder or --file.")
 
     seed_terms = [t for t in terms if t]
-    if not seed_terms:
-        raise SystemExit("No non-empty terms to anonymize.")
-
     existing_pairs = _load_map(map_path)
 
     if file is not None:
         path = file.resolve()
         text = _require_text_file(path)
+        seed_terms.extend(sorted(_discover_java_authors([path])))
+        if not seed_terms and not existing_pairs:
+            raise SystemExit("No non-empty terms or Java @author entries to anonymize.")
         new_pairs = _build_anonymize_pairs(
             seed_terms,
             existing_pairs,
             ignore_case=ignore_case,
             files=[path],
         )
-        if not new_pairs:
-            print(
-                "All terms already present in existing map; nothing new to anonymize.",
-                file=sys.stderr,
-            )
-            return
-        out = _apply_anonymize(text, [(o, n) for o, n in new_pairs])
+        all_pairs = sorted(existing_pairs + new_pairs, key=lambda p: len(p[0]), reverse=True)
+        out = _apply_anonymize(text, [(o, n) for o, n in all_pairs])
         if out != text:
             _write_text(path, out)
             changed_files = 1
@@ -391,35 +403,31 @@ def anonymize(
     if not root.is_dir():
         raise SystemExit(f"Not a directory: {root}")
 
+    seed_terms.extend(sorted(_discover_java_authors(_iter_files(root))))
+    if not seed_terms and not existing_pairs:
+        raise SystemExit("No non-empty terms or Java @author entries to anonymize.")
     new_pairs = _build_anonymize_pairs(
         seed_terms,
         existing_pairs,
         ignore_case=ignore_case,
         root=root,
     )
-    if not new_pairs:
-        print(
-            "All terms already present in existing map; nothing new to anonymize.",
-            file=sys.stderr,
-        )
-        return
-
-    # Apply only new replacements; sort longest-first to avoid partial overlaps
+    # Reuse mapped tokens in new files, longest-first to avoid partial overlaps.
+    all_pairs = sorted(existing_pairs + new_pairs, key=lambda p: len(p[0]), reverse=True)
+    replacements = [(o, n) for o, n in all_pairs]
     changed_files = 0
     for path in _iter_files(root):
         text = _read_text(path)
         if text is None:
             continue
         orig = text
-        text = _apply_anonymize(text, [(o, n) for o, n in new_pairs])
+        text = _apply_anonymize(text, replacements)
         if text != orig:
             _write_text(path, text)
             changed_files += 1
 
     # Rename directories after file edits so walks still see original paths
-    renamed_dirs = _rename_dirs(root, [(o, n) for o, n in new_pairs], reverse=False)
-
-    all_pairs = existing_pairs + new_pairs
+    renamed_dirs = _rename_dirs(root, replacements, reverse=False)
     _save_map(map_path, all_pairs)
 
     print(
@@ -584,10 +592,6 @@ def main() -> None:
             terms.extend(_load_terms_file(args.terms_file))
         if args.gitleaks_report:
             terms.extend(_load_gitleaks_secrets(args.gitleaks_report))
-        if not terms:
-            raise SystemExit(
-                "Provide --terms, --terms-file, and/or --gitleaks-report with at least one term."
-            )
         anonymize(
             terms,
             args.map,
