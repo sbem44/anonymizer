@@ -128,6 +128,8 @@ The map is gzip-compressed JSON: `{"v":1,"p":[["old","new"],...]}`. If the file 
 
 Running `anonymize` multiple times with the **same `--map` file** is fully supported. The script loads the existing map, reuses its tokens for matching terms (including in newly added files), creates tokens for new terms, and saves a combined map. A single `restore` call undoes everything.
 
+Repeated terms are added only once. Terms already in the map keep their existing tokens; identical mapping entries are removed when saving. Distinct case variants remain separate so restoration preserves the original text.
+
 ```bash
 # First pass: secrets from gitleaks
 python3 anonymize.py anonymize --folder ./project --map ./map.anon \

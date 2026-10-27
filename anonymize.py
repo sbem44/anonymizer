@@ -189,7 +189,9 @@ def _discover_java_authors(paths) -> set[str]:
 
 
 def _save_map(map_path: Path, pairs: list[list[str]]) -> None:
-    pairs = sorted(pairs, key=lambda x: len(x[0]), reverse=True)
+    # Drop identical entries, preserving distinct tokens needed to restore old files.
+    unique_pairs = dict.fromkeys((old, new) for old, new in pairs)
+    pairs = [list(pair) for pair in sorted(unique_pairs, key=lambda x: len(x[0]), reverse=True)]
     payload = json.dumps({"v": MAP_VERSION, "p": pairs}, ensure_ascii=False, separators=(",", ":"))
     map_path = map_path.resolve()
     map_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,6 +7,48 @@ from pathlib import Path
 import anonymize
 
 
+class MapDeduplicationTests(unittest.TestCase):
+    def test_repeated_terms_reuse_existing_tokens(self):
+        for target in ("file", "folder"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "project"
+                root.mkdir()
+                path = root / "notes.txt"
+                map_path = Path(temp) / "map.anon"
+                path.write_text("Company Customer")
+                kwargs = {target: path if target == "file" else root}
+                anonymize.anonymize(["Company", "Company"], map_path, **kwargs)
+                first_pairs = anonymize._load_map(map_path)
+                self.assertEqual(len(first_pairs), 1)
+                company_token = first_pairs[0][1]
+
+                # Reintroduce an existing term alongside a new one.
+                path.write_text("Company Customer")
+                anonymize.anonymize(
+                    ["Company", "Company", "Customer", "Customer"], map_path, **kwargs
+                )
+                pairs = anonymize._load_map(map_path)
+                self.assertEqual(len(pairs), 2)
+                self.assertEqual(dict(pairs)["Company"], company_token)
+                anonymize.anonymize(["Company", "Customer"], map_path, **kwargs)
+                self.assertEqual(anonymize._load_map(map_path), pairs)
+                anonymize.restore(map_path, **kwargs)
+                self.assertEqual(path.read_text(), "Company Customer")
+
+    def test_save_removes_identical_entries_and_preserves_restore_tokens(self):
+        with tempfile.TemporaryDirectory() as temp:
+            map_path = Path(temp) / "map.anon"
+            pairs = [["Company", "first_token"], ["Company", "second_token"]]
+            anonymize._save_map(map_path, pairs + pairs)
+            self.assertEqual(anonymize._load_map(map_path), pairs)
+            self.assertEqual(
+                anonymize._apply_restore(
+                    "first_token second_token", anonymize._load_restore_pairs(map_path)
+                ),
+                "Company Company",
+            )
+
+
 class JavaAuthorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
