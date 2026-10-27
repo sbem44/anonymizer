@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import sys
+import time
 from pathlib import Path
 
 MAP_VERSION = 1
@@ -548,6 +549,7 @@ def _add_target_args(parser: argparse.ArgumentParser) -> None:
 
 
 def main() -> None:
+    started_at = time.perf_counter()
     ap = argparse.ArgumentParser(description="Anonymize or restore text under a folder or file.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -611,6 +613,8 @@ def main() -> None:
             folder=args.folder,
             file=args.file,
         )
+
+    print(f"Execution time: {time.perf_counter() - started_at:.3f} seconds", file=sys.stderr)
 
 
 if __name__ == "__main__":
